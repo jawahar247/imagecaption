@@ -10,12 +10,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet34
-from torchvision.transforms import transforms
-from torchvision.datasets import CIFAR10
 import torch.optim as optim
 from torch import Tensor
 from typing import Iterator, Tuple
 import torchmetrics
+from image_caption_dataset import train_and_test_dataset
+from transformers import AutoModelForCausalLM
+from tqdm import tqdm
 
 
 def prepare_const() -> dict:
@@ -42,37 +43,6 @@ def prepare_const() -> dict:
 
     return const
 
-
-def cifar_dataset(data_root: Path) -> Tuple[Dataset, Dataset]:
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=(0.49139968, 0.48215827, 0.44653124),
-                std=(0.24703233, 0.24348505, 0.26158768),
-            ),
-        ]
-    )
-
-    trainset = CIFAR10(root=data_root, train=True, transform=transform, download=True)
-    testset = CIFAR10(root=data_root, train=False, transform=transform, download=True)
-
-    return trainset, testset
-
-def cifar_dataloader_single(
-    trainset: Dataset, testset: Dataset, bs: int
-) -> Tuple[DataLoader, DataLoader]:
-    trainloader = DataLoader(trainset, batch_size=bs, shuffle=True, num_workers=8)
-    testloader = DataLoader(testset, batch_size=bs, shuffle=False, num_workers=8)
-
-    return trainloader, testloader
-
-def cifar_model() -> nn.Module:
-    model = resnet34(num_classes=10)
-    model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1, bias=False)
-    model.maxpool = nn.Identity()
-    return model
-
 # Each process control a single gpu
 def ddp_setup(rank: int, world_size: int):
     os.environ["MASTER_ADDR"] = "localhost"
@@ -80,8 +50,7 @@ def ddp_setup(rank: int, world_size: int):
 
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-
-def cifar_dataloader_ddp(
+def image_caption_dataloader_ddp(
     trainset: Dataset,
     testset: Dataset,
     bs: int,
@@ -95,7 +64,7 @@ def cifar_dataloader_ddp(
         batch_size=bs,
         shuffle=False,
         sampler=DistributedSampler(testset, shuffle=False),
-        num_workers=8,
+        num_workers=16,
     )
 
     return trainloader, testloader, sampler_train
@@ -115,48 +84,40 @@ class TrainerSingle:
         self.trainloader = trainloader
         self.testloader = testloader
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.SGD(
+        self.optimizer = optim.Adam(
             self.model.parameters(),
-            lr=self.const["lr"],
-            momentum=self.const["momentum"],
+            lr=self.const["lr"]
         )
         self.lr_scheduler = optim.lr_scheduler.StepLR(
             self.optimizer, self.const["lr_step_size"]
         )
-        self.train_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=10, average="micro"
-        ).to(self.gpu_id)
 
-        self.valid_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=10, average="micro"
-        ).to(self.gpu_id)
-
-    def _run_batch(self, src: Tensor, tgt: Tensor) -> float:
+    def _run_batch(self, inputs) -> float:
         self.optimizer.zero_grad()
 
-        out = self.model(src)
-        loss = self.criterion(out, tgt)
+        out = self.model(
+            input_ids = inputs['input_ids'].to(self.model.device),
+            attention_mask = inputs['attention_mask'].to(self.model.device),
+            pixel_values = inputs['pixel_values'].to(self.model.device),
+            labels = inputs['labels'].to(self.model.device),
+        )
+        loss = out.loss
         loss.backward()
         self.optimizer.step()
-
-        self.train_acc.update(out, tgt)
         return loss.item()
 
     def _run_epoch(self, epoch: int):
         loss = 0.0
-        for src, tgt in self.trainloader:
-            src = src.to(self.gpu_id)
-            tgt = tgt.to(self.gpu_id)
-            loss_batch = self._run_batch(src, tgt)
+        for inputs in tqdm(self.trainloader):
+            loss_batch = self._run_batch(inputs)
             loss += loss_batch
         self.lr_scheduler.step()
 
         print(
-            f"{'-' * 90}\n[GPU{self.gpu_id}] Epoch {epoch:2d} | Batchsize: {self.const['batch_size']} | Steps: {len(self.trainloader)} | LR: {self.optimizer.param_groups[0]['lr']:.4f} | Loss: {loss / len(self.trainloader):.4f} | Acc: {100 * self.train_acc.compute().item():.2f}%",
+            f"{'-' * 90}\n[GPU{self.gpu_id}] Epoch {epoch:2d} | Batchsize: {self.const['batch_size']} | Steps: {len(self.trainloader)} | LR: {self.optimizer.param_groups[0]['lr']:.4f} | Loss: {loss / len(self.trainloader):.4f}",
             flush=True,
         )
 
-        self.train_acc.reset()
 
     def _save_checkpoint(self, epoch: int):
         ckp = self.model.state_dict()
@@ -242,15 +203,18 @@ def main_ddp(
     rank: int,
     world_size: int,
     final_model_path: str,
+    csv_file: str,
+    model_name: str,
+    data_folder: str,
 ):
     ddp_setup(rank, world_size)  # initialize ddp
 
     const = prepare_const()
-    train_dataset, test_dataset = cifar_dataset(const["data_root"])
-    train_dataloader, test_dataloader, train_sampler = cifar_dataloader_ddp(
+    train_dataset, test_dataset = train_and_test_dataset(csv_file, model_name, data_folder)
+    train_dataloader, test_dataloader, train_sampler = image_caption_dataloader_ddp(
         train_dataset, test_dataset, const["batch_size"]
     )
-    model = cifar_model()
+    model = AutoModelForCausalLM.from_pretrained(model_name)
     trainer = TrainerDDP(
         gpu_id=rank,
         model=model,
@@ -259,7 +223,7 @@ def main_ddp(
         sampler_train=train_sampler,
     )
     trainer.train(const["total_epochs"])
-    trainer.test(final_model_path)
+    # trainer.test(final_model_path)
 
     destroy_process_group()
 
@@ -268,8 +232,11 @@ def main_ddp(
 if __name__ == "__main__":
     world_size = torch.cuda.device_count()
     final_model_path = Path("./trained_models/CIFAR10_ddp_epoch14.pt")
+    csv_file = ""
+    model_name = ""
+    data_folder = ""
     mp.spawn(
         main_ddp,
-        args=(world_size, final_model_path),
+        args=(world_size, final_model_path, csv_file, model_name, data_folder),
         nprocs=world_size,
     )  # nprocs - total number of processes - # gpus

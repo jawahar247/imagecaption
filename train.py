@@ -4,7 +4,6 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 from typing import  Tuple
-import torchmetrics
 from image_caption_dataset import train_and_test_dataset
 from transformers import AutoModelForCausalLM
 from torcheval.metrics import WordErrorRate
@@ -25,7 +24,7 @@ def prepare_const() -> dict:
     const = dict(
         data_root=data_root,
         trained_models=trained_models,
-        total_epochs=10,
+        total_epochs=2,
         batch_size=2,
         lr=0.0001,  # learning rate
         momentum=0.9,
@@ -60,15 +59,11 @@ class TrainerSingle:
         self.lr_scheduler = optim.lr_scheduler.StepLR(
             self.optimizer, self.const["lr_step_size"]
         )
-        self.train_acc = torchmetrics.Accuracy(
-            task="multiclass", num_classes=10, average="micro"
-        ).to(self.gpu_id)
 
         self.valid_acc = WordErrorRate().to(self.gpu_id)
 
     def _run_batch(self, inputs) -> float:
         self.optimizer.zero_grad()
-
         out = self.model(
             input_ids = inputs['input_ids'].to(self.model.device),
             attention_mask = inputs['attention_mask'].to(self.model.device),
@@ -134,7 +129,7 @@ class TrainerSingle:
 def image_caption_dataloders(
     trainset: Dataset, testset: Dataset, bs: int
 ) -> Tuple[DataLoader, DataLoader]:
-    trainloader = DataLoader(trainset, batch_size=bs, shuffle=True, num_workers=1)
+    trainloader = DataLoader(trainset, batch_size=bs, shuffle=True, num_workers=32)
     testloader = DataLoader(testset, batch_size=bs, shuffle=False, num_workers=32)
 
     return trainloader, testloader
@@ -154,8 +149,8 @@ def main_single(model_name: str, dataset: str, data_folder:str, gpu_id: int, fin
         trainloader=train_dataloader,
         testloader=test_dataloader,
     )
-    trainer.train(const["total_epochs"])
-    trainer.test(test_dataset, final_model_path)
+    # trainer.train(const["total_epochs"])
+    trainer.test(test_dataset, "/home/jawahar/Workspace/ijawahar/imagecaption/trained_models/image_caption_epoch1.pt")
 
 
 
@@ -166,7 +161,7 @@ def arg_parser():
                     description='ifashion image caption training')
     parser.add_argument('-m', '--model-name', type=str, required=False, default= "microsoft/git-base-textcaps",help='hugging face model name to train ')
     parser.add_argument('-dataset-folder', '--dataset-folder', type=str,default= None, help="dataset root folder")
-    parser.add_argument('-csv-file', '--ccsv-file', type=str, required=True, help="dweight file path")
+    parser.add_argument('-csv-file', '--csv-file', type=str, required=True, help="dweight file path")
     args = parser.parse_args()
     return args
 

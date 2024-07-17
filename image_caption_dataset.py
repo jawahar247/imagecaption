@@ -1,9 +1,9 @@
 from transformers import AutoProcessor
 from torch.utils.data import Dataset
 import pandas as pd
-from PIL import Image
+from PIL import Image,ImageFile
 import os
-
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def train_and_test_dataset(csv_file, model_name, data_folder=None):
     df = pd.read_csv(csv_file)
