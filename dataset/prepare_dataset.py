@@ -4,31 +4,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 
 
-
-def process_image_caption_json_file(json_file):
-    with open(json_file, "r") as f:
-        data = json.load(f)
-        image_data_dict = {"id":[],"image_url":[],"title":[],"description":[],"categoryid":[],"category":[],"color":[], 'image_path': []}
-        for num, d in enumerate(data):
-            for image in d['images']:
-                for key, i in image.items():
-                    if key == 'color':
-                        continue
-                    image_data_dict['id'].append(d['id'])
-                    image_data_dict['title'].append(d['title'])
-                    image_data_dict['description'].append(d['description'])
-                    image_data_dict['categoryid'].append(d['categoryid'])
-                    image_data_dict['category'].append(d['category'])
-                    if not i:
-                        image_data_dict['image_url'].append(i)
-                        image_data_dict['image_path'].append(f'{key}.jpeg')
-                    else:
-                        image_data_dict['image_url'].append(i.split('?', 1)[0])
-                        image_data_dict['image_path'].append(f'{key}.jpeg')
-                    image_data_dict['color'].append(image['color'])
-        data_dict = pd.DataFrame(image_data_dict)
-        data_dict.to_csv("processed_full_data.csv",index=False)
-
+def process_csv_files(categories):
+    data = pd.concat([pd.read_csv(file) for file in ['processed_data_1.csv', 'processed_data_2.csv', 'processed_data_2.csv']])
+    if categories:
+        data = data[data['category'].isin(categories)]
+        processed_dict = {}
+        for i in data.iloc:
+            if i['id'] not in processed_dict:
+                processed_dict[i['id']]=i['color']        
+        data = data[[ True if processed_dict[i['id']]== i['color'] else False for i in data.iloc]]
+    return data
 
 def download_image(image_url, file_path):
     try:
@@ -46,7 +31,7 @@ def download_image(image_url, file_path):
         print(f"An unexpected error occurred: {e}")
 
 def download_images_in_parallel(image_tasks):
-    with ThreadPoolExecutor(max_workers=100) as executor:
+    with ThreadPoolExecutor(max_workers=300) as executor:
         future_to_image = {executor.submit(download_image, *task): task for task in image_tasks}
 
         for future in as_completed(future_to_image):
@@ -56,15 +41,10 @@ def download_images_in_parallel(image_tasks):
             except Exception as e:
                 print(f"Error in task {task}: {e}")
 
-def main(config_file, train_images,test_images, dataset_folder='fashion_images'):
+def main(categories, train_images,test_images, dataset_folder='fashion_images'):
     try:
-        if config_file.endswith('.json'):
-            process_image_caption_json_file(config_file)
-        if config_file.endswith('.csv'):
-            data = pd.read_csv(config_file)
-        else:
-            data = pd.read_csv("processed_full_data.csv")
-            data = data.sample(frac=1)
+        data = process_csv_files(categories.split(','))
+        data = data.sample(frac=1)
 
         if train_images and test_images:
             data = data[0: train_images+test_images+10]
@@ -108,7 +88,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
                     prog='fashon_image_data processing',
                     description='input meta_all_129927.json download required images')
-    parser.add_argument('-c', '--config_file', default='meta_all_129927.json')      # option that takes a value
+    parser.add_argument('-c', '--categories', default='minidress,skirt,gown,blouse,shorts,sweater,pants,jacket,jeans,top,dress,tee')      # option that takes a value
     parser.add_argument('-train-images', '--train-images', type=int, default= None, help='number of images to download for training dataset')
     parser.add_argument('-test-images', '--test-images', type=int, default= None, help='number of images to download for training dataset')
     parser.add_argument('-dataset_folder', '--dataset-folder', type=str, default= "fashion_images", help="path to download images")
